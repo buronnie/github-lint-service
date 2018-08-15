@@ -1,0 +1,17 @@
+{
+  "name": "github-linting-server",
+  "version": "0.0.1",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+		"start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "github-webhook-handler": "^0.7.1",
+    "node-fetch": "^2.2.0"
+  }
+}

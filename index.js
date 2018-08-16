@@ -39,20 +39,17 @@ function fileContentUrl(repoName, filename, branchName) {
 
 function postComment(repoName, prNumber, comments, index) {
 	if (index === comments.length) {
-		return;
+		return Promise.resolve(true);
 	}
-	fetch(postCommentUrl(repoName, prNumber), {
+	return fetch(postCommentUrl(repoName, prNumber), {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(comments[index]),
-	}).then(resp => resp.json(), err => console.log('error', err))
-		.then((data) => {
-			postComment(repoName, prNumber, comments, index + 1);
-		});
+	}).then(() => postComment(repoName, prNumber, comments, index + 1), err => console.log('error', err));
 }
 
 function postComments(repoName, prNumber, comments) {
-	postComment(repoName, prNumber, comments, 0);
+	return postComment(repoName, prNumber, comments, 0);
 }
 
 const handler = createHandler({ path: '/lint', secret: 'snoopy' });
@@ -123,8 +120,12 @@ function buildCommentsFromLinting(commitId, filename, diff, fileContent) {
 	return res;
 }
 
-function buildCommentsForSingleFile(repoName, file, branchName) {
-	const { filename, contents_url: contentUrl, patch: diff } = file;
+function buildCommentsForSingleFile(repoName, prNumber, branchName, files, index) {
+	if (files.length === index) {
+		return Promise.resolve(true);
+	}
+
+	const { filename, contents_url: contentUrl, patch: diff } = files[index];
 	const fileUrl = fileContentUrl(repoName, filename, branchName);
 	const commitId = parseCommitIdFromContentUrl(contentUrl);
 
@@ -132,7 +133,13 @@ function buildCommentsForSingleFile(repoName, file, branchName) {
 		method: 'GET',
 		headers: { Accept: 'application/vnd.github.VERSION.raw' },
 	}).then(resp => resp.text())
-		.then(fileContent => buildCommentsFromLinting(commitId, filename, diff, fileContent));
+		.then(fileContent => buildCommentsFromLinting(commitId, filename, diff, fileContent))
+		.then(comments => postComments(repoName, prNumber, comments))
+		.then(() => buildCommentsForSingleFile(repoName, prNumber, files, index + 1, branchName));
+}
+
+function buildCommentsForFiles(repoName, prNumber, branchName, files) {
+	return buildCommentsForSingleFile(repoName, prNumber, branchName, files, 0);
 }
 
 handler.on('pull_request', ({ payload }) => {
@@ -141,10 +148,5 @@ handler.on('pull_request', ({ payload }) => {
 	const branchName = payload.pull_request.head.ref;
 	fetch(PRFilesUrl(repoName, prNumber))
 		.then(resp => resp.json())
-		.then((files) => {
-			files.forEach((file) => {
-				buildCommentsForSingleFile(repoName, file, branchName)
-					.then(comments => postComments(repoName, prNumber, comments));
-			});
-		});
+		.then(files => buildCommentsForFiles(repoName, prNumber, branchName, files));
 });

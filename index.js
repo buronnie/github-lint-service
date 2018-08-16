@@ -135,7 +135,7 @@ function buildCommentsForSingleFile(repoName, prNumber, branchName, files, index
 	}).then(resp => resp.text())
 		.then(fileContent => buildCommentsFromLinting(commitId, filename, diff, fileContent))
 		.then(comments => postComments(repoName, prNumber, comments))
-		.then(() => buildCommentsForSingleFile(repoName, prNumber, files, index + 1, branchName));
+		.then(() => buildCommentsForSingleFile(repoName, prNumber, branchName, files, index + 1));
 }
 
 function buildCommentsForFiles(repoName, prNumber, branchName, files) {

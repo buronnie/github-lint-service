@@ -36,12 +36,27 @@ function commentsUrl(repoName, prNumber) {
 	return `${apiPrefix(repoName)}/pulls/${prNumber}/comments?access_token=${githubToken}`;
 }
 
+function statusUrl(repoName, commitSHA) {
+	return `${apiPrefix(repoName)}/statuses/${commitSHA}?access_token=${githubToken}`;
+}
+
 function parseCommitIdFromContentUrl(contentUrl) {
 	return contentUrl.split('ref=')[1];
 }
 
 function flatten2DArray(arrays) {
 	return [].concat(...arrays);
+}
+
+function postCheckStatus(url, state, description) {
+	return fetch(url, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			state,
+			description,
+		}),
+	});
 }
 
 function getChangedLinesFromHunk(hunk) {
@@ -111,10 +126,9 @@ function filterComments(repoName, prNumber, comments) {
 		));
 }
 
-function buildReview(repoName, prNumber, branchName, files) {
+function buildReview(repoName, prNumber, branchName, files, commitSHA) {
 	const { contents_url: contentUrl } = files[0];
 	const commitId = parseCommitIdFromContentUrl(contentUrl);
-
 	return Promise.all(files.map((file) => {
 		const { filename, patch: diff } = file;
 		const fileUrl = fileContentUrl(repoName, filename, branchName);
@@ -126,7 +140,14 @@ function buildReview(repoName, prNumber, branchName, files) {
 			.then(fileContent => buildCommentsFromLinting(filename, diff, fileContent));
 	}))
 		.then(commentsIn2DArray => flatten2DArray(commentsIn2DArray))
-		.then(comments => filterComments(repoName, prNumber, comments))
+		.then((comments) => {
+			if (comments.length === 0) {
+				postCheckStatus(statusUrl(repoName, commitSHA), 'success', 'no linting errors');
+			} else {
+				postCheckStatus(statusUrl(repoName, commitSHA), 'failure', 'linting check fails');
+			}
+			return filterComments(repoName, prNumber, comments);
+		})
 		.then(comments => ({
 			commit_id: commitId,
 			event: 'COMMENT',
@@ -142,6 +163,8 @@ function postReview(repoName, prNumber, review) {
 	});
 }
 
+
+
 handler.on('pull_request', ({ payload }) => {
 	if (payload.action !== 'opened' && payload.action !== 'synchronize') {
 		return;
@@ -149,8 +172,12 @@ handler.on('pull_request', ({ payload }) => {
 	const repoName = payload.repository.name;
 	const prNumber = payload.number;
 	const branchName = payload.pull_request.head.ref;
+	const commitSHA = payload.pull_request.head.sha;
+
+	postCheckStatus(statusUrl(repoName, commitSHA), 'pending', 'working hard to lint your js files');
+
 	fetch(PRFilesUrl(repoName, prNumber))
 		.then(resp => resp.json())
-		.then(files => buildReview(repoName, prNumber, branchName, files))
+		.then(files => buildReview(repoName, prNumber, branchName, files, commitSHA))
 		.then(review => postReview(repoName, prNumber, review));
 });

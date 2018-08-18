@@ -3,20 +3,7 @@ const createHandler = require('github-webhook-handler');
 const fetch = require('node-fetch');
 const { CLIEngine } = require('eslint');
 
-const esLintConfig = {
-	env: {
-		browser: true,
-		commonjs: true,
-		es6: true,
-	},
-	extends: 'airbnb',
-	rules: {
-		'no-tabs': 0,
-		indent: [2, 'tab'],
-	},
-};
-
-const linter = new CLIEngine(esLintConfig);
+const linter = new CLIEngine();
 
 const PORT = process.env.PORT || 5000;
 const githubToken = process.env.GITHUB_TOKEN;

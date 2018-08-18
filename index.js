@@ -3,8 +3,6 @@ const createHandler = require('github-webhook-handler');
 const fetch = require('node-fetch');
 const { CLIEngine } = require('eslint');
 
-const linter = new CLIEngine();
-
 const PORT = process.env.PORT || 5000;
 const githubToken = process.env.GITHUB_TOKEN;
 
@@ -15,6 +13,13 @@ http.createServer((req, res) => {
 		res.end('no such location');
 	});
 }).listen(PORT);
+
+function requireFromString(src) {
+	const Module = module.constructor;
+	const m = new Module();
+	m._compile(src, 'tmp.js');
+	return m.exports;
+}
 
 function apiPrefix(repoName) {
 	return `https://api.github.com/repos/buronnie/${repoName}`;
@@ -93,7 +98,7 @@ function getChangedLinesFromHunk(hunk) {
 	};
 }
 
-function buildCommentsFromLinting(filename, diff, fileContent) {
+function buildCommentsFromLinting(filename, diff, fileContent, linter) {
 	if (!(filename.endsWith('.js') || filename.endsWith('.jsx'))) {
 		return [];
 	}
@@ -103,8 +108,7 @@ function buildCommentsFromLinting(filename, diff, fileContent) {
 	}
 
 	const { lineNumbers } = getChangedLinesFromHunk(diff.split('\n'));
-	const res = linter.executeOnText(fileContent)
-		.results[0].messages
+	const res = linter.executeOnText(fileContent, filename).results[0].messages
 		.filter(error => error.line in lineNumbers)
 		.map(error => ({
 			body: error.message,
@@ -126,19 +130,20 @@ function filterComments(repoName, prNumber, comments) {
 		));
 }
 
-function buildReview(repoName, prNumber, branchName, files, commitSHA) {
+function buildReview(repoName, prNumber, branchName, files, commitSHA, linter) {
 	const { contents_url: contentUrl } = files[0];
 	const commitId = parseCommitIdFromContentUrl(contentUrl);
-	return Promise.all(files.map((file) => {
-		const { filename, patch: diff } = file;
-		const fileUrl = fileContentUrl(repoName, filename, branchName);
+	return Promise.all(files.filter(file => !linter.isPathIgnored(file.filename))
+		.map((file) => {
+			const { filename, patch: diff } = file;
+			const fileUrl = fileContentUrl(repoName, filename, branchName);
 
-		return fetch(fileUrl, {
-			method: 'GET',
-			headers: { Accept: 'application/vnd.github.VERSION.raw' },
-		}).then(resp => resp.text())
-			.then(fileContent => buildCommentsFromLinting(filename, diff, fileContent));
-	}))
+			return fetch(fileUrl, {
+				method: 'GET',
+				headers: { Accept: 'application/vnd.github.VERSION.raw' },
+			}).then(resp => resp.text())
+				.then(fileContent => buildCommentsFromLinting(filename, diff, fileContent, linter));
+		}))
 		.then(commentsIn2DArray => flatten2DArray(commentsIn2DArray))
 		.then((comments) => {
 			if (comments.length === 0) {
@@ -163,9 +168,7 @@ function postReview(repoName, prNumber, review) {
 	});
 }
 
-
-
-handler.on('pull_request', ({ payload }) => {
+handler.on('pull_request', async ({ payload }) => {
 	if (payload.action !== 'opened' && payload.action !== 'synchronize') {
 		return;
 	}
@@ -173,11 +176,60 @@ handler.on('pull_request', ({ payload }) => {
 	const prNumber = payload.number;
 	const branchName = payload.pull_request.head.ref;
 	const commitSHA = payload.pull_request.head.sha;
+	let eslintConfigFile;
+	let eslintIgnoreFile;
+
+	// fetch file list in the root dir
+	// priority of eslintrc configs:
+	// .eslintrc.js > .eslintrc.json > .eslintrc
+	const filelistResp = await fetch(fileContentUrl(repoName, '.', branchName));
+	const filelist = await filelistResp.json();
+
+	// check .eslintrc.js
+	if (filelist.some(file => file.name === '.eslintrc.js')) {
+		eslintConfigFile = '.eslintrc.js';
+	} else if (filelist.some(file => file.name === '.eslintrc.json')) {
+		eslintConfigFile = '.eslintrc.json';
+	} else if (filelist.some(file => file.name === '.eslintrc')) {
+		eslintConfigFile = '.eslintrc';
+	}
+	if (filelist.some(file => file.name === '.eslintignore')) {
+		eslintIgnoreFile = '.eslintignore';
+	}
+
+	// quit if there is no eslint config file
+	if (!eslintConfigFile) {
+		return;
+	}
 
 	postCheckStatus(statusUrl(repoName, commitSHA), 'pending', 'working hard to lint your js files');
 
-	fetch(PRFilesUrl(repoName, prNumber))
-		.then(resp => resp.json())
-		.then(files => buildReview(repoName, prNumber, branchName, files, commitSHA))
-		.then(review => postReview(repoName, prNumber, review));
+	const eslintrcUrl = fileContentUrl(repoName, eslintConfigFile, branchName);
+	const eslintrcResp = await fetch(eslintrcUrl, {
+		method: 'GET',
+		headers: { Accept: 'application/vnd.github.VERSION.raw' },
+	});
+	const eslintrcText = await eslintrcResp.text();
+	const eslintrcConfig = requireFromString(eslintrcText);
+
+	let ignorePattern;
+	if (eslintIgnoreFile) {
+		const eslintIgnoreUrl = fileContentUrl(repoName, eslintIgnoreFile, branchName);
+		const eslintIgnoreResp = await fetch(eslintIgnoreUrl, {
+			method: 'GET',
+			headers: { Accept: 'application/vnd.github.VERSION.raw' },
+		});
+		ignorePattern = await eslintIgnoreResp.text();
+	}
+
+	const linter = new CLIEngine({
+		baseConfig: eslintrcConfig,
+		useEslintrc: false,
+		ignorePattern,
+	});
+
+	const filesResp = await fetch(PRFilesUrl(repoName, prNumber));
+	const files = await filesResp.json();
+	const review = await buildReview(repoName, prNumber, branchName, files, commitSHA, linter);
+	await postReview(repoName, prNumber, review);
 });

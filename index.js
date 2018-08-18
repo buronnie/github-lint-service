@@ -21,15 +21,19 @@ function apiPrefix(repoName) {
 }
 
 function postReviewUrl(repoName, prNumber) {
-	return `${apiPrefix(repoName, prNumber)}/pulls/${prNumber}/reviews?access_token=${githubToken}`;
+	return `${apiPrefix(repoName)}/pulls/${prNumber}/reviews?access_token=${githubToken}`;
 }
 
 function PRFilesUrl(repoName, prNumber) {
-	return `${apiPrefix(repoName, prNumber)}/pulls/${prNumber}/files?access_token=${githubToken}`;
+	return `${apiPrefix(repoName)}/pulls/${prNumber}/files?access_token=${githubToken}`;
 }
 
 function fileContentUrl(repoName, filename, branchName) {
 	return `${apiPrefix(repoName)}/contents/${filename}?ref=${branchName}&access_token=${githubToken}`;
+}
+
+function commentsUrl(repoName, prNumber) {
+	return `${apiPrefix(repoName)}/pulls/${prNumber}/comments?access_token=${githubToken}`;
 }
 
 function parseCommitIdFromContentUrl(contentUrl) {
@@ -95,7 +99,19 @@ function buildCommentsFromLinting(filename, diff, fileContent) {
 	return res;
 }
 
-function buildReview(repoName, branchName, files) {
+// avoid commenting the same error when new commit is pushed
+function filterComments(repoName, prNumber, comments) {
+	return fetch(commentsUrl(repoName, prNumber))
+		.then(resp => resp.json())
+		.then(currentComments => comments.filter(
+			comment => !currentComments.some(
+				currentComment => comment.position === currentComment.position
+					&& comment.body === currentComment.body,
+			),
+		));
+}
+
+function buildReview(repoName, prNumber, branchName, files) {
 	const { contents_url: contentUrl } = files[0];
 	const commitId = parseCommitIdFromContentUrl(contentUrl);
 
@@ -110,6 +126,7 @@ function buildReview(repoName, branchName, files) {
 			.then(fileContent => buildCommentsFromLinting(filename, diff, fileContent));
 	}))
 		.then(commentsIn2DArray => flatten2DArray(commentsIn2DArray))
+		.then(comments => filterComments(repoName, prNumber, comments))
 		.then(comments => ({
 			commit_id: commitId,
 			event: 'COMMENT',
@@ -126,7 +143,7 @@ function postReview(repoName, prNumber, review) {
 }
 
 handler.on('pull_request', ({ payload }) => {
-	if (payload.action !== 'opened') {
+	if (payload.action !== 'opened' && payload.action !== 'synchronize') {
 		return;
 	}
 	const repoName = payload.repository.name;
@@ -134,10 +151,6 @@ handler.on('pull_request', ({ payload }) => {
 	const branchName = payload.pull_request.head.ref;
 	fetch(PRFilesUrl(repoName, prNumber))
 		.then(resp => resp.json())
-		.then(files => buildReview(repoName, branchName, files))
+		.then(files => buildReview(repoName, prNumber, branchName, files))
 		.then(review => postReview(repoName, prNumber, review));
-});
-
-handler.on('push', ({ payload }) => {
-	console.log(payload);
 });
